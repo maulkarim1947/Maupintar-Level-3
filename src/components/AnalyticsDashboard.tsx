@@ -39,6 +39,10 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
   const [hoveredPointIdx, setHoveredPointIdx] = useState<number | null>(null);
 
+  React.useEffect(() => {
+    setHoveredPointIdx(null);
+  }, [studentFilter, subjectFilter, dateRange]);
+
   const uniqueStudents = useMemo(() => {
     const names = Array.from(new Set(records.map((r) => r.studentName).filter(Boolean)));
     return names.sort((a, b) => a.localeCompare(b));

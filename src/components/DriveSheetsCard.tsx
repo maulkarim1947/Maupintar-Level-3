@@ -38,6 +38,7 @@ interface DriveSheetsCardProps {
   onClaimTeacherPasscode: (passcode: string) => Promise<void>;
   onLoginTeacherPasscode: (passcode: string) => Promise<void>;
   onSaveAppsScriptUrl: (url: string) => Promise<void>;
+  onTestAppsScriptUrl: (url: string) => Promise<void>;
 }
 
 const APPS_SCRIPT_TEMPLATE = `function doPost(e) {
@@ -125,6 +126,7 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
   onClaimTeacherPasscode,
   onLoginTeacherPasscode,
   onSaveAppsScriptUrl,
+  onTestAppsScriptUrl,
 }) => {
   const [customInput, setCustomInput] = useState('');
   const [linking, setLinking] = useState(false);
@@ -180,6 +182,20 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
       setTeacherMsg('URL Penulis Otomatis Google Drive berhasil disimpan!');
     } catch (err) {
       setTeacherMsg(err instanceof Error ? err.message : 'Gagal menyimpan URL Apps Script.');
+    } finally {
+      setSavingTeacher(false);
+    }
+  };
+
+  const handleTestWebhook = async () => {
+    if (!scriptUrlInput.trim()) return;
+    setSavingTeacher(true);
+    setTeacherMsg(null);
+    try {
+      await onTestAppsScriptUrl(scriptUrlInput.trim());
+      setTeacherMsg('Tes berhasil! Data uji coba sudah tertulis ke Google Spreadsheet Anda.');
+    } catch (err) {
+      setTeacherMsg(err instanceof Error ? err.message : 'Tes koneksi gagal.');
     } finally {
       setSavingTeacher(false);
     }
@@ -304,6 +320,14 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
                 className="mc-btn-emerald px-4 py-2 text-xs font-semibold whitespace-nowrap cursor-pointer disabled:opacity-50"
               >
                 {savingTeacher ? 'Menyimpan...' : 'Aktifkan Auto-Write'}
+              </button>
+              <button
+                type="button"
+                disabled={savingTeacher || !scriptUrlInput.trim()}
+                onClick={handleTestWebhook}
+                className="mc-btn-oak px-4 py-2 text-xs font-semibold whitespace-nowrap cursor-pointer disabled:opacity-50"
+              >
+                Uji Koneksi
               </button>
             </form>
             {teacherMsg && <p className="text-xs font-semibold text-[#15803d]">{teacherMsg}</p>}

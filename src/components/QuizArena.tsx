@@ -137,6 +137,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   const [showViolationBanner, setShowViolationBanner] = useState<string | null>(null);
   const [submittedRecord, setSubmittedRecord] = useState<QuizResultRecord | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showIncompleteConfirm, setShowIncompleteConfirm] = useState(false);
   const [badgeError, setBadgeError] = useState(false);
 
   const startedAtRef = useRef<number>(Date.now());
@@ -289,7 +290,16 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     const currentQ = preparedQuestions[currentIdx];
     if (!currentQ) return;
     const isEnglish = subject.id === 'bahasa-inggris';
-    const textToRead = `Soal nomor ${currentQ.displayNumber}. ${currentQ.original.prompt}`;
+    const prefix = isEnglish
+      ? `Question number ${currentQ.displayNumber}.`
+      : `Soal nomor ${currentQ.displayNumber}.`;
+    const passageHint =
+      currentIdx === 0 && currentQ.original.passage
+        ? isEnglish
+          ? 'Read the passage first. '
+          : 'Bacalah teks bacaan terlebih dahulu. '
+        : '';
+    const textToRead = `${passageHint}${prefix} ${currentQ.original.prompt}`;
     speakGuide(textToRead, {
       lang: isEnglish ? 'en-US' : 'id-ID',
       rate: speechRate,
@@ -775,14 +785,48 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
           </div>
 
           <div className="pt-3 border-t border-[#e6dfd1] space-y-2">
-            <button
-              type="button"
-              disabled={isSubmitting}
-              onClick={() => void handleSubmitQuiz()}
-              className="mc-btn-emerald w-full py-2.5 px-4 text-xs font-bold cursor-pointer disabled:opacity-60"
-            >
-              {isSubmitting ? 'Menyimpan...' : 'Kumpulkan Semua Jawaban'}
-            </button>
+            {showIncompleteConfirm ? (
+              <div className="p-3 bg-[#fffbeb] border-2 border-[#b45309] space-y-2 text-xs">
+                <p className="font-bold text-[#78350f]">
+                  Masih ada {preparedQuestions.length - answeredCount} soal belum dijawab. Yakin mau kumpulkan sekarang?
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowIncompleteConfirm(false)}
+                    className="mc-btn-oak flex-1 py-1.5 px-2 font-semibold cursor-pointer"
+                  >
+                    Cek Lagi
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={() => {
+                      setShowIncompleteConfirm(false);
+                      void handleSubmitQuiz();
+                    }}
+                    className="mc-btn-emerald flex-1 py-1.5 px-2 font-bold cursor-pointer"
+                  >
+                    Ya, Kirim
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={() => {
+                  if (answeredCount < preparedQuestions.length) {
+                    setShowIncompleteConfirm(true);
+                  } else {
+                    void handleSubmitQuiz();
+                  }
+                }}
+                className="mc-btn-emerald w-full py-2.5 px-4 text-xs font-bold cursor-pointer disabled:opacity-60"
+              >
+                {isSubmitting ? 'Menyimpan...' : 'Kumpulkan Semua Jawaban'}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {

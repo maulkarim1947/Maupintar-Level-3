@@ -17,6 +17,7 @@ import {
   playBlockSound,
   speakGuide,
   stopSpeaking,
+  unlockAudioEngine,
 } from './utils/audioGuide';
 import {
   loadLocalHistory,
@@ -47,6 +48,7 @@ import { IntegrityPledgeModal } from './components/IntegrityPledgeModal';
 import { QuizArena } from './components/QuizArena';
 import { ConfirmSheetWriteModal } from './components/ConfirmSheetWriteModal';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
+import { WelcomeGate } from './components/WelcomeGate';
 
 type PendingConfirmAction =
   | { kind: 'create-spreadsheet' }
@@ -68,12 +70,12 @@ export default function App() {
   const [studentClass, setStudentClass] = useState(initialProfile.className);
 
   // Voice Guide & Audio state
+  const [hasEnteredApp, setHasEnteredApp] = useState(false);
   const [autoDubbing, setAutoDubbing] = useState(true);
   const [speechRate, setSpeechRate] = useState(0.95);
   const [soundMuted, setSoundMuted] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [guideMessage, setGuideMessage] = useState(GUIDE_SCRIPTS.welcome);
-  const [hasGreetedOnInteraction, setHasGreetedOnInteraction] = useState(false);
+  const [guideMessage, setGuideMessage] = useState(GUIDE_SCRIPTS.championWelcome);
 
   // Server & Teacher Drive Auto-Write state (Zero student login!)
   const [hasTeacherPasscode, setHasTeacherPasscode] = useState(false);
@@ -190,18 +192,21 @@ export default function App() {
     void refreshServerData();
   }, [refreshServerData]);
 
-  // First user interaction auto-dubbing greeting
-  useEffect(() => {
-    if (hasGreetedOnInteraction || !autoDubbing) return;
-    const handleFirstClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target?.closest('button')) return;
-      setHasGreetedOnInteraction(true);
-      triggerGuideSpeech(GUIDE_SCRIPTS.welcome);
-    };
-    window.addEventListener('pointerdown', handleFirstClick, { once: true });
-    return () => window.removeEventListener('pointerdown', handleFirstClick);
-  }, [hasGreetedOnInteraction, autoDubbing, triggerGuideSpeech]);
+  const handleAcceptChampion = () => {
+    unlockAudioEngine();
+    setSoundMuted(false);
+    setAutoDubbing(true);
+    setHasEnteredApp(true);
+    playBlockSound('levelup', false);
+    triggerGuideSpeech(GUIDE_SCRIPTS.championWelcome);
+  };
+
+  const handleEnterMuted = () => {
+    setAutoDubbing(false);
+    setSoundMuted(true);
+    setHasEnteredApp(true);
+    setGuideMessage(GUIDE_SCRIPTS.welcome);
+  };
 
   // Firebase Auth listener (Teacher only)
   useEffect(() => {
@@ -382,6 +387,23 @@ export default function App() {
     setToastMessage('Penulisan otomatis ke Google Drive tanpa login siswa aktif!');
   };
 
+  const handleTestAppsScriptUrl = async (url: string) => {
+    if (!teacherToken) throw new Error('Silakan buka panel guru terlebih dahulu.');
+    const res = await fetch('/api/teacher/test-webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${teacherToken}`,
+      },
+      body: JSON.stringify({ appsScriptUrl: url }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Gagal menguji koneksi Google Apps Script.');
+    }
+    setToastMessage('Tes berhasil! Baris uji coba telah dikirim ke Google Spreadsheet Anda.');
+  };
+
   // Confirmed Google Drive/Sheets mutations (Teacher-triggered)
   const executeConfirmedAction = async () => {
     if (!confirmAction) return;
@@ -456,7 +478,6 @@ export default function App() {
 
   const handleSelectSubject = (subject: SubjectInfo) => {
     playBlockSound('click', soundMuted);
-    setHasGreetedOnInteraction(true);
     setPendingSubject(subject);
     if (autoDubbing) {
       triggerGuideSpeech(GUIDE_SCRIPTS.pledge);
@@ -523,7 +544,6 @@ export default function App() {
   const handleNavigate = (tab: ActiveTab) => {
     if (activeQuizSubject && !latestCompletedRecord) return;
     playBlockSound('click', soundMuted);
-    setHasGreetedOnInteraction(true);
     setActiveQuizSubject(null);
     setLatestCompletedRecord(null);
     setActiveTab(tab);
@@ -609,7 +629,7 @@ export default function App() {
           speechRate={speechRate}
           soundMuted={soundMuted}
           onPlayMessage={() => {
-            setHasGreetedOnInteraction(true);
+            unlockAudioEngine();
             triggerGuideSpeech(guideMessage);
           }}
           onStopSpeaking={() => {
@@ -707,7 +727,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => {
-                          setHasGreetedOnInteraction(true);
+                          unlockAudioEngine();
                           triggerGuideSpeech(GUIDE_SCRIPTS.welcome);
                         }}
                         className="mc-btn-oak px-4 py-2.5 text-xs sm:text-sm font-semibold flex items-center gap-2 cursor-pointer"
@@ -925,6 +945,7 @@ export default function App() {
                 onClaimTeacherPasscode={handleClaimTeacherPasscode}
                 onLoginTeacherPasscode={handleLoginTeacherPasscode}
                 onSaveAppsScriptUrl={handleSaveAppsScriptUrl}
+                onTestAppsScriptUrl={handleTestAppsScriptUrl}
               />
             )}
           </>
@@ -937,6 +958,13 @@ export default function App() {
           <span>Tak Perlu Ragu · Prestasi Menunggu</span>
         </div>
       </footer>
+
+      {!hasEnteredApp && (
+        <WelcomeGate
+          onAcceptChampion={handleAcceptChampion}
+          onEnterMuted={handleEnterMuted}
+        />
+      )}
 
       <IntegrityPledgeModal
         subject={pendingSubject}

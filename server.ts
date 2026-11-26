@@ -180,11 +180,13 @@ async function forwardToAppsScript(
     });
     if (!response.ok) return false;
     const text = await response.text();
-    // Apps Script returns JSON or OK text when successful
-    if (text.toLowerCase().includes('error') && !text.includes('"ok":true')) {
+    try {
+      const parsed = JSON.parse(text) as { ok?: boolean };
+      return parsed?.ok === true;
+    } catch {
+      // Apps Script returned HTML (e.g. login wall when 'Anyone' access is not set)
       return false;
     }
-    return true;
   } catch {
     return false;
   }
@@ -390,6 +392,52 @@ async function startServer() {
       ok: true,
       autoWriteActive: Boolean(updated.appsScriptUrl),
     });
+  });
+
+  // Protected test ping to verify Teacher's Apps Script Web App actually writes JSON { ok: true }
+  app.post('/api/teacher/test-webhook', requireTeacherAuth, async (req: Request, res: Response) => {
+    const rawUrl = typeof req.body?.appsScriptUrl === 'string' ? req.body.appsScriptUrl.trim() : '';
+    const cfg = readTeacherConfig();
+    const targetUrl = rawUrl || cfg.appsScriptUrl || '';
+    if (!targetUrl || !isAllowedAppsScriptUrl(targetUrl)) {
+      res.status(400).json({ error: 'URL Apps Script belum valid.' });
+      return;
+    }
+
+    const testPayload: StoredSubmission = {
+      sessionId: `PING-${Date.now().toString(36).toUpperCase()}`,
+      timestampIso: new Date().toISOString(),
+      dateLabel: new Date().toLocaleDateString('id-ID'),
+      studentName: 'Uji Koneksi Sistem',
+      studentClass: '3A',
+      subjectId: 'bahasa-indonesia',
+      subjectName: 'Uji Koneksi Google Drive',
+      mode: 'quick-10',
+      totalQuestions: 10,
+      correctCount: 10,
+      wrongCount: 0,
+      score: 100,
+      durationSeconds: 1,
+      tabViolations: 0,
+      copyViolations: 0,
+      totalViolations: 0,
+      integrityStatus: 'Jujur Penuh',
+      analysisSummary: 'Uji koneksi penulisan otomatis ke Google Drive berhasil.',
+      answerSummary: 'PING',
+      integrityEvents: [],
+      details: [],
+      syncedToSheet: true,
+    };
+
+    const ok = await forwardToAppsScript(targetUrl, testPayload);
+    if (!ok) {
+      res.status(502).json({
+        error:
+          'Google Apps Script tidak mengembalikan konfirmasi sukses. Pastikan saat Deploy memilih "Who has access: Anyone (Siapa saja)".',
+      });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   // Mount Vite in dev or serve dist in production
