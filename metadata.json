@@ -1,0 +1,8 @@
+{
+  "name": "Mau Pintar SAS Kelas 3",
+  "description": "Web persiapan SAS Kelas 3 bertema Minecraft dengan panduan dubbing suara pemandu, pengawasan kejujuran ujian, penyimpanan otomatis ke Google Sheets dan Google Drive, serta analitik perkembangan nilai siswa secara berkala.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
