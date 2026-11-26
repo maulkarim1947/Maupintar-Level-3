@@ -17,7 +17,7 @@ interface VoiceGuideBannerProps {
 
 const GUIDE_STEPS = [
   '1. Isi Nama & Kelas',
-  '2. Hubungkan Drive & Sheets',
+  '2. Pilih Mata Pelajaran',
   '3. Ikrar Kejujuran',
   '4. Latihan & Analitik',
 ];

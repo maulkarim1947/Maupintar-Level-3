@@ -13,6 +13,7 @@ import {
   KeyRound,
   LogOut,
   Zap,
+  CloudUpload,
 } from 'lucide-react';
 import { SheetPreference } from '../utils/storage';
 
@@ -23,9 +24,11 @@ interface DriveSheetsCardProps {
   sheetPref: SheetPreference | null;
   isSyncing: boolean;
   syncError: string | null;
+  apiEnableUrl?: string | null;
   unsyncedCount: number;
   hasTeacherPasscode: boolean;
   envPasscodeActive: boolean;
+  envAppsScriptActive?: boolean;
   teacherToken: string | null;
   autoWriteActive: boolean;
   appsScriptUrlValue: string;
@@ -39,6 +42,7 @@ interface DriveSheetsCardProps {
   onLoginTeacherPasscode: (passcode: string) => Promise<void>;
   onSaveAppsScriptUrl: (url: string) => Promise<void>;
   onTestAppsScriptUrl: (url: string) => Promise<void>;
+  onSyncWebhookPending?: () => Promise<void>;
 }
 
 const APPS_SCRIPT_TEMPLATE = `function doPost(e) {
@@ -54,8 +58,24 @@ const APPS_SCRIPT_TEMPLATE = `function doPost(e) {
         'Ringkasan Jawaban', 'Analisis Hasil'
       ]);
     }
+
+    var sessionId = String(data.sessionId || '');
+    var lastRow = summary.getLastRow();
+    if (sessionId && lastRow > 1) {
+      var existingIds = summary.getRange(2, 1, lastRow - 1, 1).getValues();
+      for (var i = 0; i < existingIds.length; i++) {
+        if (String(existingIds[i][0]) === sessionId) {
+          return ContentService.createTextOutput(JSON.stringify({
+            ok: true,
+            duplicate: true,
+            spreadsheetUrl: ss.getUrl()
+          })).setMimeType(ContentService.MimeType.JSON);
+        }
+      }
+    }
+
     summary.appendRow([
-      data.sessionId || '',
+      sessionId,
       data.timestampIso || new Date().toISOString(),
       data.studentName || '',
       data.studentClass || '',
@@ -82,7 +102,7 @@ const APPS_SCRIPT_TEMPLATE = `function doPost(e) {
       }
       var rows = data.details.map(function(item) {
         return [
-          data.sessionId || '',
+          sessionId,
           data.timestampIso || '',
           data.studentName || '',
           data.studentClass || '',
@@ -96,8 +116,54 @@ const APPS_SCRIPT_TEMPLATE = `function doPost(e) {
       detailSheet.getRange(detailSheet.getLastRow() + 1, 1, rows.length, 9).setValues(rows);
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ ok: true }))
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: true,
+      spreadsheetUrl: ss.getUrl()
+    })).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: err.message }))
       .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function doGet(e) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var summary = ss.getSheetByName('Rekap Nilai');
+    if (!summary || summary.getLastRow() <= 1) {
+      return ContentService.createTextOutput(JSON.stringify({
+        ok: true,
+        spreadsheetUrl: ss.getUrl(),
+        records: []
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+    var values = summary.getRange(2, 1, summary.getLastRow() - 1, 15).getValues();
+    var records = values
+      .filter(function(r) { return r[0] && r[2]; })
+      .map(function(r) {
+        return {
+          sessionId: String(r[0]),
+          timestampIso: r[1] instanceof Date ? r[1].toISOString() : String(r[1]),
+          studentName: String(r[2]),
+          studentClass: String(r[3]),
+          subjectName: String(r[4]),
+          mode: String(r[5]),
+          totalQuestions: Number(r[6]) || 30,
+          correctCount: Number(r[7]) || 0,
+          wrongCount: Number(r[8]) || 0,
+          score: Number(r[9]) || 0,
+          durationSeconds: Number(r[10]) || 0,
+          totalViolations: Number(r[11]) || 0,
+          integrityStatus: String(r[12] || 'Jujur Penuh'),
+          answerSummary: String(r[13] || ''),
+          analysisSummary: String(r[14] || '')
+        };
+      });
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: true,
+      spreadsheetUrl: ss.getUrl(),
+      records: records
+    })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({ ok: false, error: err.message }))
       .setMimeType(ContentService.MimeType.JSON);
@@ -111,9 +177,11 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
   sheetPref,
   isSyncing,
   syncError,
+  apiEnableUrl,
   unsyncedCount,
   hasTeacherPasscode,
   envPasscodeActive,
+  envAppsScriptActive = false,
   teacherToken,
   autoWriteActive,
   appsScriptUrlValue,
@@ -127,6 +195,7 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
   onLoginTeacherPasscode,
   onSaveAppsScriptUrl,
   onTestAppsScriptUrl,
+  onSyncWebhookPending,
 }) => {
   const [customInput, setCustomInput] = useState('');
   const [linking, setLinking] = useState(false);
@@ -135,6 +204,7 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
   const [copiedCode, setCopiedCode] = useState(false);
   const [savingTeacher, setSavingTeacher] = useState(false);
   const [teacherMsg, setTeacherMsg] = useState<string | null>(null);
+  const [teacherIsError, setTeacherIsError] = useState(false);
 
   React.useEffect(() => {
     setScriptUrlInput(appsScriptUrlValue);
@@ -157,6 +227,7 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
     if (!passcodeInput.trim()) return;
     setSavingTeacher(true);
     setTeacherMsg(null);
+    setTeacherIsError(false);
     try {
       if (!hasTeacherPasscode && !envPasscodeActive) {
         await onClaimTeacherPasscode(passcodeInput.trim());
@@ -167,6 +238,7 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
       }
       setPasscodeInput('');
     } catch (err) {
+      setTeacherIsError(true);
       setTeacherMsg(err instanceof Error ? err.message : 'Gagal memverifikasi kode sandi.');
     } finally {
       setSavingTeacher(false);
@@ -177,10 +249,12 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
     e.preventDefault();
     setSavingTeacher(true);
     setTeacherMsg(null);
+    setTeacherIsError(false);
     try {
       await onSaveAppsScriptUrl(scriptUrlInput.trim());
-      setTeacherMsg('URL Penulis Otomatis Google Drive berhasil disimpan!');
+      setTeacherMsg('URL Penulis Otomatis 24 Jam ke Google Drive berhasil diaktifkan!');
     } catch (err) {
+      setTeacherIsError(true);
       setTeacherMsg(err instanceof Error ? err.message : 'Gagal menyimpan URL Apps Script.');
     } finally {
       setSavingTeacher(false);
@@ -191,11 +265,29 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
     if (!scriptUrlInput.trim()) return;
     setSavingTeacher(true);
     setTeacherMsg(null);
+    setTeacherIsError(false);
     try {
       await onTestAppsScriptUrl(scriptUrlInput.trim());
       setTeacherMsg('Tes berhasil! Data uji coba sudah tertulis ke Google Spreadsheet Anda.');
     } catch (err) {
+      setTeacherIsError(true);
       setTeacherMsg(err instanceof Error ? err.message : 'Tes koneksi gagal.');
+    } finally {
+      setSavingTeacher(false);
+    }
+  };
+
+  const handleSyncWebhook = async () => {
+    if (!onSyncWebhookPending) return;
+    setSavingTeacher(true);
+    setTeacherMsg(null);
+    setTeacherIsError(false);
+    try {
+      await onSyncWebhookPending();
+      setTeacherMsg('Semua data tertunda berhasil dikirim ke Google Spreadsheet.');
+    } catch (err) {
+      setTeacherIsError(true);
+      setTeacherMsg(err instanceof Error ? err.message : 'Gagal mengirim data tertunda.');
     } finally {
       setSavingTeacher(false);
     }
@@ -213,7 +305,7 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Section 1: Zero-Login Live Auto-Writer to Teacher's Google Drive */}
+      {/* Section 1: 24/7 Offline Auto-Writer (Google Forms style) */}
       <section className="mc-block-card p-5 sm:p-6 bg-white space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#e6dfd1] pb-4">
           <div className="flex items-start gap-3">
@@ -222,10 +314,10 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
             </div>
             <div>
               <h2 className="font-pixel text-base text-[#1f1a14]">
-                Penulisan Otomatis Tanpa Login Siswa (Google Drive Guru)
+                Penulisan Otomatis 24 Jam ke Google Drive (Seperti Google Forms)
               </h2>
               <p className="text-sm text-[#5b5245] mt-0.5">
-                Siswa tidak perlu login akun Google untuk mengerjakan. Semua hasil (Nama, Jawaban, Score, Analisis, dan Jumlah Kecurangan) otomatis tersimpan di server dan langsung tertulis ke Google Spreadsheet Anda.
+                Cukup pasang sekali lewat Google Apps Script. Siswa langsung mengerjakan tanpa login Google, dan setiap jawaban otomatis tertulis ke Google Spreadsheet Anda 24 jam sehari meski Anda sedang offline.
               </p>
             </div>
           </div>
@@ -235,7 +327,11 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
               autoWriteActive ? 'text-[#15803d]' : 'text-[#b45309]'
             }`}
           >
-            {autoWriteActive ? 'Auto-Write Langsung: Aktif' : 'Auto-Write: Menunggu Setup Guru'}
+            {autoWriteActive
+              ? envAppsScriptActive
+                ? 'Auto-Write 24 Jam: Aktif (Env Vercel/Server)'
+                : 'Auto-Write 24 Jam: Aktif'
+              : 'Auto-Write: Menunggu Setup Guru'}
           </span>
         </div>
 
@@ -254,8 +350,8 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
                 </p>
                 <p className="text-xs text-[#5b5245]">
                   {!hasTeacherPasscode && !envPasscodeActive
-                    ? 'Buat kode sandi rahasia Anda (minimal 4 karakter) agar hanya guru yang bisa mengatur tautan Google Spreadsheet.'
-                    : 'Masukkan kode sandi guru untuk membuka atau mengubah URL Google Apps Script.'}
+                    ? 'Buat kode sandi guru Anda (minimal 4 karakter) agar hanya guru yang bisa mengatur tautan Google Spreadsheet.'
+                    : 'Masukkan kode sandi guru Anda untuk membuka pengaturan URL Google Apps Script.'}
                 </p>
               </div>
             </div>
@@ -280,14 +376,18 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
                 {!hasTeacherPasscode && !envPasscodeActive ? 'Simpan Kode Sandi' : 'Buka Panel Guru'}
               </button>
             </div>
-            {teacherMsg && <p className="text-xs font-semibold text-[#b45309]">{teacherMsg}</p>}
+            {teacherMsg && (
+              <p className={`text-xs font-semibold ${teacherIsError ? 'text-[#dc2626]' : 'text-[#15803d]'}`}>
+                {teacherMsg}
+              </p>
+            )}
           </form>
         ) : (
           <div className="space-y-4">
             <div className="bg-[#f4f1ea] border-2 border-[#cfc6b4] p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs sm:text-sm font-bold text-[#1f1a14]">
-                  Langkah Mengaktifkan Tulis Langsung Tanpa Login Siswa (Sekali Saja):
+                  Cara Aktifkan Simpan Otomatis 24 Jam Tanpa Login (Tidak Perlu Google Cloud API):
                 </p>
                 <button
                   type="button"
@@ -298,11 +398,19 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
                   <span>{copiedCode ? 'Kode Disalin!' : 'Salin Kode Apps Script'}</span>
                 </button>
               </div>
-              <ol className="text-xs text-[#4b4237] space-y-1 list-decimal pl-4">
-                <li>Buka Google Spreadsheet Anda di Google Drive (buat di panel bawah jika belum ada).</li>
-                <li>Klik menu <strong>Ekstensi (Extensions) &rarr; Apps Script</strong>, hapus isi lama lalu tempel kode yang sudah disalin.</li>
-                <li>Klik <strong>Terapkan (Deploy) &rarr; Deployment baru &rarr; Aplikasi Web</strong>. Atur <em>Jalankan sebagai: Saya</em> dan <em>Yang memiliki akses: Siapa saja (Anyone)</em>.</li>
-                <li>Salin URL Aplikasi Web (<code className="font-mono-tabular">https://script.google.com/macros/s/.../exec</code>) ke kolom di bawah ini.</li>
+              <ol className="text-xs text-[#4b4237] space-y-1.5 list-decimal pl-4">
+                <li>
+                  Buka Google Drive Anda (<strong>drive.google.com</strong>), klik <strong>Baru &rarr; Google Spreadsheet</strong>, beri nama misalnya <em>Rekap Nilai SAS Kelas 3 - Mau Pintar</em>.
+                </li>
+                <li>
+                  Di dalam Spreadsheet, klik menu <strong>Ekstensi (Extensions) &rarr; Apps Script</strong>, hapus kode lama lalu tempel kode yang baru saja Anda salin (mendukung simpan jawaban &amp; baca grafik analitik otomatis).
+                </li>
+                <li>
+                  Klik <strong>Terapkan (Deploy) &rarr; Deployment baru &rarr; Aplikasi Web</strong>. Pilih <em>Jalankan sebagai: Saya</em> dan <em>Yang memiliki akses: Siapa saja (Anyone)</em>, lalu klik <strong>Terapkan</strong> dan izinkan akses.
+                </li>
+                <li>
+                  Tempel URL Aplikasi Web (<code className="font-mono-tabular">https://script.google.com/macros/s/.../exec</code>) ke kotak di bawah ini, lalu klik <strong>Aktifkan Auto-Write</strong> dan <strong>Uji Koneksi</strong>.
+                </li>
               </ol>
             </div>
 
@@ -330,12 +438,56 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
                 Uji Koneksi
               </button>
             </form>
-            {teacherMsg && <p className="text-xs font-semibold text-[#15803d]">{teacherMsg}</p>}
+
+            {autoWriteActive && unsyncedCount > 0 && onSyncWebhookPending && (
+              <div className="flex items-center justify-between gap-3 p-3 bg-[#fffbeb] border-2 border-[#b45309]">
+                <span className="text-xs font-medium text-[#78350f]">
+                  Ada {unsyncedCount} hasil siswa di server yang belum dikirim ke Spreadsheet Anda.
+                </span>
+                <button
+                  type="button"
+                  disabled={savingTeacher}
+                  onClick={handleSyncWebhook}
+                  className="mc-btn-emerald px-3 py-1.5 text-xs font-semibold whitespace-nowrap cursor-pointer"
+                >
+                  Kirim Sekarang via Apps Script
+                </button>
+              </div>
+            )}
+
+            {teacherMsg && (
+              <p className={`text-xs font-semibold ${teacherIsError ? 'text-[#dc2626]' : 'text-[#15803d]'}`}>
+                {teacherMsg}
+              </p>
+            )}
+
+            {/* GitHub & Vercel Deployment Environment Reminder */}
+            <div className="bg-[#f0fdf4] border-2 border-[#15803d] p-4 space-y-2">
+              <div className="flex items-center gap-2 text-[#14532d] font-bold text-xs sm:text-sm">
+                <CloudUpload className="w-4 h-4 shrink-0" />
+                <span>Siap Publish ke GitHub &amp; Vercel (Simpan Permanen 24 Jam)</span>
+              </div>
+              <p className="text-xs text-[#166534] leading-relaxed">
+                Saat men-deploy repositori ini ke <strong>Vercel</strong>, tambahkan 2 Environment Variables berikut di menu <em>Vercel Project Settings &rarr; Environment Variables</em> agar hasil siswa tetap menulis ke Google Drive 24 jam non-stop meski server Vercel restart:
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono-tabular">
+                <div className="bg-white border border-[#15803d] p-2">
+                  <span className="font-bold text-[#14532d]">TEACHER_PASSCODE</span>
+                  <p className="text-[#5b5245] text-[11px] mt-0.5">Isi dengan kode sandi guru Anda</p>
+                </div>
+                <div className="bg-white border border-[#15803d] p-2">
+                  <span className="font-bold text-[#14532d]">APPS_SCRIPT_URL</span>
+                  <p className="text-[#5b5245] text-[11px] mt-0.5 truncate">
+                    {scriptUrlInput.trim() || 'URL Web App https://script.google.com/macros/s/.../exec'}
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         )}
       </section>
 
-      {/* Section 2: Teacher Google Account OAuth Sync (Create Spreadsheet in Drive & Batch Sync) */}
+      {/* Section 2: Optional Teacher Google Account OAuth Sync */}
       <section className="mc-block-card p-5 sm:p-6 bg-white space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#e6dfd1] pb-4">
           <div className="flex items-start gap-3">
@@ -344,10 +496,10 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
             </div>
             <div>
               <h2 className="font-pixel text-base text-[#1f1a14]">
-                Akun Google Drive Guru (Sinkronisasi &amp; Buat File)
+                Koneksi Akun Google Guru (Opsional)
               </h2>
               <p className="text-sm text-[#5b5245] mt-0.5">
-                Hanya guru/pemilik web yang masuk di sini untuk membuat file Spreadsheet di Google Drive atau mengirim hasil siswa yang tersimpan di server.
+                Jika Anda sudah memakai <strong>Penulisan Otomatis 24 Jam (Apps Script)</strong> di atas, Anda tidak wajib login di sini. Menu ini opsional untuk membuat file Spreadsheet langsung dari aplikasi atau sinkronisasi manual.
               </p>
             </div>
           </div>
@@ -367,10 +519,25 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
         {syncError && (
           <div
             role="alert"
-            className="p-3 bg-[#fef2f2] border-2 border-[#dc2626] text-[#991b1b] text-xs font-medium flex items-start gap-2"
+            className="p-3.5 bg-[#fef2f2] border-2 border-[#dc2626] text-[#991b1b] text-xs font-medium space-y-2"
           >
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-            <span>{syncError}</span>
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{syncError}</span>
+            </div>
+            {apiEnableUrl && (
+              <div className="pl-6">
+                <a
+                  href={apiEnableUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 font-bold underline text-[#7f1d1d]"
+                >
+                  <span>Aktifkan API di Google Cloud Console sekarang</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              </div>
+            )}
           </div>
         )}
 
@@ -381,7 +548,7 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
                 Masuk Sebagai Guru ({user?.email || 'Akun Google Anda'})
               </p>
               <p className="text-xs text-[#5b5245] leading-relaxed">
-                Buat otomatis folder &ldquo;Mau Pintar - SAS Kelas 3&rdquo; dan spreadsheet di Google Drive Anda, atau kirimkan {unsyncedCount} hasil siswa dari server ke Google Sheets.
+                Buat otomatis spreadsheet di Google Drive Anda, atau kirimkan {unsyncedCount} hasil siswa dari server ke Google Sheets. (Jika memakai Vercel, pastikan domain Vercel sudah didaftarkan di Firebase Authorized Domains.)
               </p>
             </div>
 
@@ -479,10 +646,10 @@ export const DriveSheetsCard: React.FC<DriveSheetsCardProps> = ({
               <div className="bg-[#fffbeb] border-2 border-[#b45309] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                   <p className="text-sm font-bold text-[#78350f]">
-                    Spreadsheet Rekap Nilai Belum Dibuat di Google Drive
+                    Spreadsheet Rekap Nilai Belum Terhubung
                   </p>
                   <p className="text-xs text-[#92400e] mt-0.5">
-                    Buat otomatis file spreadsheet baru di folder &ldquo;Mau Pintar - SAS Kelas 3&rdquo; atau hubungkan ID spreadsheet yang sudah ada.
+                    Buat otomatis file spreadsheet baru di Google Drive Anda atau tempel link/ID spreadsheet yang sudah ada di bawah.
                   </p>
                 </div>
                 <button

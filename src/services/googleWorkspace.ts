@@ -76,6 +76,17 @@ export const initWorkspaceAuth = (
   });
 };
 
+export class WorkspaceApiDisabledError extends Error {
+  service: 'drive' | 'sheets';
+  enableUrl: string;
+  constructor(service: 'drive' | 'sheets', message: string, enableUrl: string) {
+    super(message);
+    this.name = 'WorkspaceApiDisabledError';
+    this.service = service;
+    this.enableUrl = enableUrl;
+  }
+}
+
 export const signInWithGoogleWorkspace = async (): Promise<{
   user: User;
   accessToken: string;
@@ -85,10 +96,31 @@ export const signInWithGoogleWorkspace = async (): Promise<{
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (!credential?.accessToken) {
-      throw new Error('Token akses Google Drive & Sheets tidak ditemukan. Silakan coba masuk lagi.');
+      throw new Error(
+        'Token akses Google Drive & Sheets tidak ditemukan. Pastikan semua izin dicentang lalu coba masuk lagi.'
+      );
     }
     cachedAccessToken = credential.accessToken;
     return { user: result.user, accessToken: cachedAccessToken };
+  } catch (err: unknown) {
+    const code = (err as { code?: string })?.code || '';
+    if (code === 'auth/popup-blocked') {
+      throw new Error(
+        'Jendela login Google diblokir oleh browser. Izinkan pop-up untuk situs ini lalu klik Sign in with Google lagi.'
+      );
+    }
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      throw new Error('Jendela login Google ditutup sebelum selesai. Silakan coba lagi.');
+    }
+    if (code === 'auth/unauthorized-domain') {
+      throw new Error(
+        `Domain (${window.location.hostname}) belum didaftarkan di Firebase Console -> Authentication -> Settings -> Authorized domains. Tambahkan domain ini atau gunakan mode 24-Jam Auto-Write Apps Script di atas.`
+      );
+    }
+    if (code === 'auth/network-request-failed') {
+      throw new Error('Koneksi internet terputus saat menghubungi layanan Google.');
+    }
+    throw err;
   } finally {
     isSigningIn = false;
   }
@@ -127,36 +159,63 @@ async function googleFetchJson<T>(url: string, accessToken: string, init?: Reque
   }
   if (!res.ok) {
     const errObj = json as { error?: { message?: string } };
-    throw new Error(errObj?.error?.message || `Google API error (${res.status})`);
+    const rawMsg = errObj?.error?.message || `Google API error (${res.status})`;
+    if (
+      rawMsg.includes('has not been used in project') ||
+      rawMsg.includes('is disabled') ||
+      rawMsg.includes('SERVICE_DISABLED')
+    ) {
+      const urlMatch = rawMsg.match(/https:\/\/console\.developers\.google\.com[^\s]+/);
+      if (url.includes('drive.googleapis.com')) {
+        throw new WorkspaceApiDisabledError(
+          'drive',
+          'Google Drive API pada project Google Cloud belum diaktifkan.',
+          urlMatch?.[0] ||
+            'https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=85207983760'
+        );
+      }
+      throw new WorkspaceApiDisabledError(
+        'sheets',
+        'Google Sheets API pada project Google Cloud belum diaktifkan.',
+        urlMatch?.[0] ||
+          'https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=85207983760'
+      );
+    }
+    throw new Error(rawMsg);
   }
   return json as T;
 }
 
-async function ensureDriveFolder(accessToken: string): Promise<string> {
-  const query = encodeURIComponent(
-    `name = '${DRIVE_FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
-  );
-  const listData = await googleFetchJson<{ files?: DriveFileItem[] }>(
-    `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)&spaces=drive`,
-    accessToken
-  );
+async function ensureDriveFolder(accessToken: string): Promise<string | null> {
+  try {
+    const query = encodeURIComponent(
+      `name = '${DRIVE_FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+    );
+    const listData = await googleFetchJson<{ files?: DriveFileItem[] }>(
+      `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)&spaces=drive`,
+      accessToken
+    );
 
-  if (listData.files && listData.files.length > 0) {
-    return listData.files[0].id;
-  }
-
-  const created = await googleFetchJson<{ id: string }>(
-    'https://www.googleapis.com/drive/v3/files',
-    accessToken,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        name: DRIVE_FOLDER_NAME,
-        mimeType: 'application/vnd.google-apps.folder',
-      }),
+    if (listData.files && listData.files.length > 0) {
+      return listData.files[0].id;
     }
-  );
-  return created.id;
+
+    const created = await googleFetchJson<{ id: string }>(
+      'https://www.googleapis.com/drive/v3/files',
+      accessToken,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          name: DRIVE_FOLDER_NAME,
+          mimeType: 'application/vnd.google-apps.folder',
+        }),
+      }
+    );
+    return created.id;
+  } catch {
+    // Gracefully skip folder creation if drive.googleapis.com is disabled
+    return null;
+  }
 }
 
 export async function findAppSpreadsheetInDrive(accessToken: string): Promise<{
@@ -219,19 +278,21 @@ export async function createAppSpreadsheetInDrive(accessToken: string): Promise<
 
   const spreadsheetId = created.spreadsheetId;
 
-  try {
-    const fileMeta = await googleFetchJson<{ parents?: string[] }>(
-      `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?fields=parents`,
-      accessToken
-    );
-    const previousParents = (fileMeta.parents || []).join(',');
-    await googleFetchJson(
-      `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${encodeURIComponent(folderId)}&removeParents=${encodeURIComponent(previousParents)}&fields=id,parents`,
-      accessToken,
-      { method: 'PATCH', body: JSON.stringify({}) }
-    );
-  } catch {
-    // Non-fatal if moving between Drive folders is skipped
+  if (folderId) {
+    try {
+      const fileMeta = await googleFetchJson<{ parents?: string[] }>(
+        `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?fields=parents`,
+        accessToken
+      );
+      const previousParents = (fileMeta.parents || []).join(',');
+      await googleFetchJson(
+        `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${encodeURIComponent(folderId)}&removeParents=${encodeURIComponent(previousParents)}&fields=id,parents`,
+        accessToken,
+        { method: 'PATCH', body: JSON.stringify({}) }
+      );
+    } catch {
+      // Non-fatal if moving between Drive folders is skipped
+    }
   }
 
   await googleFetchJson(

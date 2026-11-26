@@ -116,7 +116,7 @@ export const SubjectSelector: React.FC<SubjectSelectorProps> = ({
                     <IconComponent className="w-5 h-5" />
                   </div>
                   <span className="text-xs font-medium text-[#5b5245] font-mono-tabular">
-                    {mode === 'full-30' ? '30 Soal' : '10 Soal'} · 45m
+                    {mode === 'full-30' ? '30 Soal · 45m' : '10 Soal · 15m'}
                   </span>
                 </div>
 

@@ -39,6 +39,7 @@ import {
   readRecordsFromSpreadsheet,
   signInWithGoogleWorkspace,
   signOutWorkspace,
+  WorkspaceApiDisabledError,
 } from './services/googleWorkspace';
 import { ActiveTab, HeaderBar } from './components/HeaderBar';
 import { VoiceGuideBanner } from './components/VoiceGuideBanner';
@@ -82,6 +83,7 @@ export default function App() {
   const [envPasscodeActive, setEnvPasscodeActive] = useState(false);
   const [teacherToken, setTeacherToken] = useState<string | null>(null); // In memory only
   const [autoWriteActive, setAutoWriteActive] = useState(false);
+  const [envAppsScriptActive, setEnvAppsScriptActive] = useState(false);
   const [appsScriptUrlValue, setAppsScriptUrlValue] = useState('');
 
   // Teacher Google Workspace OAuth state
@@ -91,6 +93,7 @@ export default function App() {
   const [sheetPref, setSheetPref] = useState<SheetPreference | null>(() => loadSheetPreference());
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [apiEnableUrl, setApiEnableUrl] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Quiz & Analytics Data (Server + Google Sheets + Local)
@@ -170,12 +173,14 @@ export default function App() {
           hasTeacherPasscode?: boolean;
           envPasscodeActive?: boolean;
           autoWriteActive?: boolean;
+          envAppsScriptActive?: boolean;
           spreadsheetTitle?: string | null;
           spreadsheetUrl?: string | null;
         };
         setHasTeacherPasscode(Boolean(h.hasTeacherPasscode));
         setEnvPasscodeActive(Boolean(h.envPasscodeActive));
         setAutoWriteActive(Boolean(h.autoWriteActive));
+        setEnvAppsScriptActive(Boolean(h.envAppsScriptActive));
       }
       if (subRes.ok) {
         const s = (await subRes.json()) as { records?: QuizResultRecord[] };
@@ -227,12 +232,20 @@ export default function App() {
     async (token: string, spreadsheetId: string) => {
       setIsSyncing(true);
       setSyncError(null);
+      setApiEnableUrl(null);
       try {
         const rows = await readRecordsFromSpreadsheet(token, spreadsheetId);
         setSheetHistory(rows);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Gagal membaca Google Spreadsheet.';
-        setSyncError(msg);
+        if (err instanceof WorkspaceApiDisabledError) {
+          setSyncError(
+            `${err.message} Aktifkan terlebih dahulu atau gunakan Auto-Write 24 Jam Apps Script di atas.`
+          );
+          setApiEnableUrl(err.enableUrl);
+        } else {
+          const msg = err instanceof Error ? err.message : 'Gagal membaca Google Spreadsheet.';
+          setSyncError(msg);
+        }
       } finally {
         setIsSyncing(false);
       }
@@ -243,6 +256,7 @@ export default function App() {
   const handleGoogleSignIn = async (): Promise<string | null> => {
     setIsSigningIn(true);
     setSyncError(null);
+    setApiEnableUrl(null);
     try {
       const { user: signedInUser, accessToken: token } = await signInWithGoogleWorkspace();
       setUser(signedInUser);
@@ -263,18 +277,34 @@ export default function App() {
             await loadRowsFromSheet(token, found.spreadsheetId);
           }
         }
-      } catch {
-        const found = await findAppSpreadsheetInDrive(token);
-        if (found) {
-          setSheetPref(found);
-          saveSheetPreference(found);
-          await loadRowsFromSheet(token, found.spreadsheetId);
+      } catch (innerErr) {
+        if (innerErr instanceof WorkspaceApiDisabledError) {
+          setSyncError(
+            `Akun Google berhasil terhubung (${signedInUser.email}), namun ${innerErr.message} Anda tetap bisa membuat Spreadsheet baru, menempelkan Link Spreadsheet yang sudah ada, atau mengaktifkan Google Drive API lewat tautan di bawah.`
+          );
+          setApiEnableUrl(innerErr.enableUrl);
+        } else {
+          try {
+            const found = await findAppSpreadsheetInDrive(token);
+            if (found) {
+              setSheetPref(found);
+              saveSheetPreference(found);
+              await loadRowsFromSheet(token, found.spreadsheetId);
+            }
+          } catch (fallbackErr) {
+            if (fallbackErr instanceof WorkspaceApiDisabledError) {
+              setSyncError(
+                `Akun Google berhasil terhubung (${signedInUser.email}), namun ${fallbackErr.message} Anda tetap bisa membuat Spreadsheet baru atau menempelkan Link Spreadsheet di bawah.`
+              );
+              setApiEnableUrl(fallbackErr.enableUrl);
+            }
+          }
         }
       } finally {
         setIsSyncing(false);
       }
 
-      setToastMessage('Akun Google Drive & Sheets guru berhasil terhubung.');
+      setToastMessage(`Akun Google guru (${signedInUser.email}) berhasil terhubung.`);
       return token;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Gagal masuk dengan Google.';
@@ -289,6 +319,8 @@ export default function App() {
     await signOutWorkspace();
     setUser(null);
     setAccessToken(null);
+    setSyncError(null);
+    setApiEnableUrl(null);
     setToastMessage('Koneksi akun Google guru telah diputuskan.');
   };
 
@@ -300,6 +332,7 @@ export default function App() {
     }
     const id = extractSpreadsheetId(rawInput);
     setSyncError(null);
+    setApiEnableUrl(null);
     setIsSyncing(true);
     try {
       const meta = await getSpreadsheetMetadata(token, id);
@@ -313,11 +346,16 @@ export default function App() {
       await loadRowsFromSheet(token, nextPref.spreadsheetId);
       setToastMessage(`Berhasil terhubung ke "${nextPref.spreadsheetTitle}".`);
     } catch (err) {
-      setSyncError(
-        err instanceof Error
-          ? err.message
-          : 'Spreadsheet tidak ditemukan atau izin akses belum diberikan.'
-      );
+      if (err instanceof WorkspaceApiDisabledError) {
+        setSyncError(err.message);
+        setApiEnableUrl(err.enableUrl);
+      } else {
+        setSyncError(
+          err instanceof Error
+            ? err.message
+            : 'Spreadsheet tidak ditemukan atau izin akses belum diberikan.'
+        );
+      }
     } finally {
       setIsSyncing(false);
     }
@@ -329,8 +367,12 @@ export default function App() {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (res.ok) {
-      const cfg = (await res.json()) as { appsScriptUrl?: string };
+      const cfg = (await res.json()) as {
+        appsScriptUrl?: string;
+        envAppsScriptActive?: boolean;
+      };
       setAppsScriptUrlValue(cfg.appsScriptUrl || '');
+      setEnvAppsScriptActive(Boolean(cfg.envAppsScriptActive));
     }
   };
 
@@ -404,6 +446,20 @@ export default function App() {
     setToastMessage('Tes berhasil! Baris uji coba telah dikirim ke Google Spreadsheet Anda.');
   };
 
+  const handleSyncWebhookPending = async () => {
+    if (!teacherToken) throw new Error('Silakan buka panel guru terlebih dahulu.');
+    const res = await fetch('/api/submissions/sync-webhook', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${teacherToken}` },
+    });
+    const data = (await res.json()) as { ok?: boolean; syncedCount?: number; error?: string };
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Gagal mengirim data tertunda ke Apps Script.');
+    }
+    await refreshServerData();
+    setToastMessage(`${data.syncedCount || 0} hasil siswa berhasil dikirim ke Google Spreadsheet.`);
+  };
+
   // Confirmed Google Drive/Sheets mutations (Teacher-triggered)
   const executeConfirmedAction = async () => {
     if (!confirmAction) return;
@@ -415,11 +471,18 @@ export default function App() {
 
     setIsSyncing(true);
     setSyncError(null);
+    setApiEnableUrl(null);
 
     try {
       let targetPref = sheetPref;
       if (!targetPref) {
-        const found = await findAppSpreadsheetInDrive(token);
+        let found: SheetPreference | null = null;
+        try {
+          found = await findAppSpreadsheetInDrive(token);
+        } catch {
+          // If Drive API is disabled, fall back directly to Sheets API creation
+          found = null;
+        }
         if (found) {
           targetPref = found;
         } else {
@@ -461,7 +524,12 @@ export default function App() {
       }
       setConfirmAction(null);
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : 'Gagal menyimpan ke Google Sheets.');
+      if (err instanceof WorkspaceApiDisabledError) {
+        setSyncError(err.message);
+        setApiEnableUrl(err.enableUrl);
+      } else {
+        setSyncError(err instanceof Error ? err.message : 'Gagal menyimpan ke Google Sheets.');
+      }
     } finally {
       setIsSyncing(false);
     }
@@ -924,9 +992,11 @@ export default function App() {
                 sheetPref={sheetPref}
                 isSyncing={isSyncing}
                 syncError={syncError}
+                apiEnableUrl={apiEnableUrl}
                 unsyncedCount={unsyncedRecords.length}
                 hasTeacherPasscode={hasTeacherPasscode}
                 envPasscodeActive={envPasscodeActive}
+                envAppsScriptActive={envAppsScriptActive}
                 teacherToken={teacherToken}
                 autoWriteActive={autoWriteActive}
                 appsScriptUrlValue={appsScriptUrlValue}
@@ -946,6 +1016,7 @@ export default function App() {
                 onLoginTeacherPasscode={handleLoginTeacherPasscode}
                 onSaveAppsScriptUrl={handleSaveAppsScriptUrl}
                 onTestAppsScriptUrl={handleTestAppsScriptUrl}
+                onSyncWebhookPending={handleSyncWebhookPending}
               />
             )}
           </>

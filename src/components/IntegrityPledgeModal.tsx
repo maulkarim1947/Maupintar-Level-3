@@ -29,6 +29,13 @@ export const IntegrityPledgeModal: React.FC<IntegrityPledgeModalProps> = ({
   const [useFullscreen, setUseFullscreen] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  React.useEffect(() => {
+    setPledge1(false);
+    setPledge2(false);
+    setPledge3(false);
+    setErrorMsg(null);
+  }, [subject?.id]);
+
   if (!subject) return null;
 
   const allChecked = pledge1 && pledge2 && pledge3;
